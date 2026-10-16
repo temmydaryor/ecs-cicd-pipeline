@@ -20,6 +20,17 @@ variable "github_repo" {
   type        = string
 }
 
+variable "github_sub_prefix" {
+  description = <<-EOT
+    Leave empty for classic repos (trust uses repo:ORG/REPO).
+    Newer repos use GitHub's immutable subject, which contains numeric IDs. Get yours with:
+      gh api repos/ORG/REPO/actions/oidc/customization/sub
+    and paste the sub_claim_prefix value here, e.g. repo:ORG@123456/REPO@7891011
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "github_environment" {
   description = "GitHub Environment that gates deploys (Settings > Environments)."
   type        = string

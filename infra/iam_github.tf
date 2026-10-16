@@ -21,6 +21,8 @@ data "aws_iam_openid_connect_provider" "github" {
 locals {
   oidc_provider_arn = var.create_oidc_provider ? aws_iam_openid_connect_provider.github[0].arn : data.aws_iam_openid_connect_provider.github[0].arn
   repo_slug         = "${var.github_org}/${var.github_repo}"
+  # Classic repos send  repo:ORG/REPO:...   Newer repos send  repo:ORG@ID/REPO@ID:...
+  sub_prefix = var.github_sub_prefix != "" ? var.github_sub_prefix : "repo:${local.repo_slug}"
 }
 
 # HIDDEN DETAIL: the `sub` claim GitHub sends CHANGES when a job uses an environment.
@@ -43,7 +45,7 @@ data "aws_iam_policy_document" "build_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${local.repo_slug}:ref:refs/heads/main"]
+      values   = ["${local.sub_prefix}:ref:refs/heads/main"]
     }
   }
 }
@@ -63,7 +65,7 @@ data "aws_iam_policy_document" "deploy_trust" {
     condition {
       test     = "StringEquals"
       variable = "token.actions.githubusercontent.com:sub"
-      values   = ["repo:${local.repo_slug}:environment:${var.github_environment}"]
+      values   = ["${local.sub_prefix}:environment:${var.github_environment}"]
     }
   }
 }

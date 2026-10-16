@@ -237,7 +237,7 @@ Set:
 
 ```powershell
 terraform init
-terraform apply -target=aws_ecr_repository.app
+terraform apply -target='aws_ecr_repository.app'
 ```
 Type `yes`. (Using `-target` is normally discouraged; here it is the clean way to do a staged bootstrap. Terraform will warn you — that is expected.)
 
@@ -257,7 +257,8 @@ If PowerShell refuses to run the script: `powershell -ExecutionPolicy Bypass -Fi
 ```powershell
 $ACCOUNT  = aws sts get-caller-identity --query Account --output text
 $REGISTRY = "$ACCOUNT.dkr.ecr.ca-west-1.amazonaws.com"
-aws ecr get-login-password --region ca-west-1 | docker login --username AWS --password-stdin $REGISTRY
+$pw = (aws ecr get-login-password --region ca-west-1 | Out-String).Trim()
+docker login --username AWS --password $pw $REGISTRY
 docker build --platform linux/amd64 --build-arg GIT_SHA=manual-v1 -t "$REGISTRY/ecs-cicd-app:manual-v1" .
 docker push "$REGISTRY/ecs-cicd-app:manual-v1"
 ```
@@ -346,7 +347,7 @@ It prints per-phase times: docker build, ECR login+push, register task definitio
 
 ### 5.3 Deploy once fully by hand in the console (for your own "manual pain" count)
 
-1. ECR → push a new image (the 4 docker commands from Phase 2)
+1. Push a new image by hand: run the "Manual equivalent" commands from Phase 2 (account/registry variables, `docker login`, `docker build`, `docker push`) with a **new** tag such as `manual-v5` (tags are immutable)
 2. **ECS → Task definitions → `ecs-cicd-app` → Create new revision**
 3. Scroll to **Container - 1 → Image URI** → paste the new image URI → **Create**
 4. **ECS → Clusters → `ecs-cicd-cluster` → Services → `ecs-cicd-service` → Update service**
@@ -384,6 +385,9 @@ Look at the Actions tab right now. The push you just made triggers the workflow.
 - fail or stall at `build-push` because the repository variables are not set yet.
 
 That is expected. Cancel the run if you like.
+
+
+> **Hidden detail — immutable OIDC subject (new GitHub repos).** Run `gh api repos/YOU/ecs-cicd-pipeline/actions/oidc/customization/sub`. If it shows `"use_immutable_subject": true` and a `sub_claim_prefix` such as `repo:YOU@123/ecs-cicd-pipeline@456`, put that exact prefix in `github_sub_prefix` in `terraform.tfvars` and apply. Otherwise the roles only trust the name-based subject and the pipeline fails with `Not authorized to perform sts:AssumeRoleWithWebIdentity`.
 
 ### 6.2 Set the repository variables
 
