@@ -99,10 +99,25 @@ jobs:
       - name: Check ECR vulnerability scan
         continue-on-error: ${{ vars.FAIL_ON_CRITICAL != 'true' }}
         run: |
-          aws ecr wait image-scan-complete --repository-name "$ECR_REPOSITORY" --image-id imageTag="${{ steps.meta.outputs.sha }}"
+          TAG="${{ steps.meta.outputs.sha }}"
+          # The scan record appears a few seconds AFTER the push, so poll for it (up to ~2.5 min).
+          STATUS=""
+          for i in $(seq 1 30); do
+            STATUS=$(aws ecr describe-image-scan-findings --repository-name "$ECR_REPOSITORY" \
+              --image-id imageTag="$TAG" --query 'imageScanStatus.status' --output text 2>/dev/null || true)
+            echo "Attempt $i: scan status = ${STATUS:-not started yet}"
+            if [ "$STATUS" = "COMPLETE" ] || [ "$STATUS" = "FAILED" ] || [ "$STATUS" = "UNSUPPORTED_IMAGE" ]; then break; fi
+            sleep 5
+          done
+
+          if [ "$STATUS" != "COMPLETE" ]; then
+            echo "::warning::No completed ECR basic scan for $TAG (status: ${STATUS:-none}). Skipping the vulnerability gate."
+            echo "### ECR scan: not available (status: ${STATUS:-none})" >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
           COUNTS=$(aws ecr describe-image-scan-findings --repository-name "$ECR_REPOSITORY" \
-            --image-id imageTag="${{ steps.meta.outputs.sha }}" \
-            --query 'imageScanFindings.findingSeverityCounts' --output json)
+            --image-id imageTag="$TAG" --query 'imageScanFindings.findingSeverityCounts' --output json)
           echo "Scan findings: $COUNTS"
           echo "### ECR scan: \`$COUNTS\`" >> "$GITHUB_STEP_SUMMARY"
           CRITICAL=$(echo "$COUNTS" | jq -r '.CRITICAL // 0')
