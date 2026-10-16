@@ -1,0 +1,60 @@
+name: rollback
+
+# Manual "big red button". Run it from Actions > rollback > Run workflow.
+on:
+  workflow_dispatch:
+    inputs:
+      revision:
+        description: "Task definition revision number to restore (leave empty = the previous ACTIVE revision)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+
+jobs:
+  rollback:
+    runs-on: ubuntu-latest
+    environment:
+      name: production # same approval gate as a normal deploy
+      url: ${{ vars.APP_URL }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Work out the rollback target
+        id: target
+        env:
+          # Passed via env (not interpolated into the script) so a typed input can never inject shell.
+          REVISION: ${{ inputs.revision }}
+        run: |
+          CURRENT=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+          FAMILY=$(echo "$CURRENT" | sed 's#.*/##; s#:[0-9]*$##')
+          if [ -n "$REVISION" ]; then
+            case "$REVISION" in (*[!0-9]*) echo "revision must be a number"; exit 1;; esac
+            TARGET="${FAMILY}:${REVISION}"
+          else
+            TARGET=$(aws ecs list-task-definitions --family-prefix "$FAMILY" --status ACTIVE --sort DESC \
+              --query 'taskDefinitionArns' --output json | jq -r --arg cur "$CURRENT" '[.[] | select(. != $cur)][0]')
+          fi
+          echo "current=$CURRENT" >> "$GITHUB_OUTPUT"
+          echo "target=$TARGET" >> "$GITHUB_OUTPUT"
+          echo "Rolling back $CURRENT -> $TARGET"
+
+      - name: Roll back and wait for a stable service
+        run: |
+          aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+            --task-definition "${{ steps.target.outputs.target }}" --force-new-deployment > /dev/null
+          aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+          echo "### :rewind: Rolled back ${{ steps.target.outputs.current }} -> ${{ steps.target.outputs.target }}" >> "$GITHUB_STEP_SUMMARY"

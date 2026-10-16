@@ -1,0 +1,16 @@
+# Terraform
+.terraform/
+*.tfstate
+*.tfstate.*
+terraform.tfvars
+*.tfplan
+crash.log
+
+# Python
+__pycache__/
+.pytest_cache/
+.venv/
+
+# Local env / secrets
+.env
+*.pem

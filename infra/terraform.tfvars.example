@@ -1,0 +1,16 @@
+# Copy to terraform.tfvars (which is git-ignored) and fill in YOUR values.
+aws_region   = "ca-west-1"
+project_name = "ecs-cicd"
+
+# Case-sensitive! "Temidayo" and "temidayo" are different to the OIDC trust policy.
+github_org  = "YOUR_GITHUB_USERNAME"
+github_repo = "ecs-cicd-pipeline"
+
+alert_email = "you@example.com"
+
+# Set to false ONLY if `aws iam list-open-id-connect-providers` already shows
+# token.actions.githubusercontent.com in this account.
+create_oidc_provider = true
+
+# Tag you will push manually in Phase 2 before the full apply.
+image_tag = "manual-v1"

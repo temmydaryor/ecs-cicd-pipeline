@@ -1,0 +1,200 @@
+name: ci-cd
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "docs/**"
+      - "infra/**"
+      - "**.md"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never run two deploys against the same service at once; queue instead of cancelling
+# (cancelling a deploy half-way is how you end up in a confusing state).
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  AWS_REGION: ${{ vars.AWS_REGION }}
+  ECR_REPOSITORY: ${{ vars.ECR_REPOSITORY }}
+  ECS_CLUSTER: ${{ vars.ECS_CLUSTER }}
+  ECS_SERVICE: ${{ vars.ECS_SERVICE }}
+  CONTAINER_NAME: app # must match the container "name" in infra/ecs.tf
+
+jobs:
+  # -------------------------------------------------------------------------
+  # 1) TEST: runs on every push AND every pull request
+  # -------------------------------------------------------------------------
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: requirements-dev.txt
+
+      - name: Install dependencies
+        run: pip install -r requirements-dev.txt
+
+      - name: Unit tests
+        run: pytest -q
+
+      - name: Lint Dockerfile
+        uses: hadolint/hadolint-action@v3.1.0
+        with:
+          dockerfile: Dockerfile
+          failure-threshold: error
+
+      - name: Build image (no push) to prove the Dockerfile works
+        run: docker build --build-arg GIT_SHA=ci-check -t ci-check:latest .
+
+  # -------------------------------------------------------------------------
+  # 2) BUILD + PUSH: only on main, never on pull requests
+  # -------------------------------------------------------------------------
+  build-push:
+    needs: test
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    permissions:
+      id-token: write # REQUIRED for OIDC. Without it: "Credentials could not be loaded".
+      contents: read
+    outputs:
+      image: ${{ steps.meta.outputs.image }}
+      sha: ${{ steps.meta.outputs.sha }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (build role, OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_BUILD_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Log in to Amazon ECR
+        id: ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image tag
+        id: meta
+        run: |
+          SHA="${GITHUB_SHA::7}"
+          echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
+          echo "image=${{ steps.ecr.outputs.registry }}/${ECR_REPOSITORY}:${SHA}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push (immutable tag = commit SHA)
+        run: |
+          docker build --build-arg GIT_SHA="${{ steps.meta.outputs.sha }}" -t "${{ steps.meta.outputs.image }}" .
+          docker push "${{ steps.meta.outputs.image }}"
+
+      # Set the repo variable FAIL_ON_CRITICAL=true to make critical CVEs block the deploy.
+      - name: Check ECR vulnerability scan
+        continue-on-error: ${{ vars.FAIL_ON_CRITICAL != 'true' }}
+        run: |
+          aws ecr wait image-scan-complete --repository-name "$ECR_REPOSITORY" --image-id imageTag="${{ steps.meta.outputs.sha }}"
+          COUNTS=$(aws ecr describe-image-scan-findings --repository-name "$ECR_REPOSITORY" \
+            --image-id imageTag="${{ steps.meta.outputs.sha }}" \
+            --query 'imageScanFindings.findingSeverityCounts' --output json)
+          echo "Scan findings: $COUNTS"
+          echo "### ECR scan: \`$COUNTS\`" >> "$GITHUB_STEP_SUMMARY"
+          CRITICAL=$(echo "$COUNTS" | jq -r '.CRITICAL // 0')
+          if [ "$CRITICAL" -gt 0 ]; then
+            echo "::warning::$CRITICAL CRITICAL vulnerabilities found"
+            exit 1
+          fi
+
+  # -------------------------------------------------------------------------
+  # 3) DEPLOY: pauses for manual approval because of `environment: production`
+  # -------------------------------------------------------------------------
+  deploy:
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment:
+      name: production # configure Required reviewers under Settings > Environments
+      url: ${{ vars.APP_URL }}
+    permissions:
+      id-token: write
+      contents: read
+    steps:
+      - name: Configure AWS credentials (deploy role, OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ vars.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Remember the currently running task definition (rollback target)
+        id: prev
+        run: |
+          PREV=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+          echo "arn=$PREV" >> "$GITHUB_OUTPUT"
+          echo "started=$(date +%s)" >> "$GITHUB_OUTPUT"
+          echo "Previous task definition: $PREV"
+
+      - name: Download the live task definition
+        run: |
+          aws ecs describe-task-definition --task-definition "${{ steps.prev.outputs.arn }}" \
+            --query taskDefinition > task-definition.json
+
+      - name: Put the new image into the task definition
+        id: render
+        uses: aws-actions/amazon-ecs-render-task-definition@v1
+        with:
+          task-definition: task-definition.json
+          container-name: ${{ env.CONTAINER_NAME }}
+          image: ${{ needs.build-push.outputs.image }}
+
+      - name: Deploy to ECS and wait for a stable service
+        uses: aws-actions/amazon-ecs-deploy-task-definition@v2
+        with:
+          task-definition: ${{ steps.render.outputs.task-definition }}
+          service: ${{ env.ECS_SERVICE }}
+          cluster: ${{ env.ECS_CLUSTER }}
+          wait-for-service-stability: true
+          wait-for-minutes: 15
+
+      - name: Smoke test the public URL (must serve the NEW version)
+        run: |
+          EXPECTED="${{ needs.build-push.outputs.sha }}"
+          for i in $(seq 1 20); do
+            BODY=$(curl -fsS --max-time 5 "${{ vars.APP_URL }}/health" || true)
+            GOT=$(echo "$BODY" | jq -r '.version // empty' 2>/dev/null || true)
+            echo "attempt $i: got version '${GOT}' (want '${EXPECTED}')"
+            if [ "$GOT" = "$EXPECTED" ]; then exit 0; fi
+            sleep 6
+          done
+          echo "::error::Smoke test failed"
+          exit 1
+
+      # ROLLBACK #3 (belt and braces): the ECS circuit breaker and alarms roll back
+      # failed ECS deployments automatically. This step covers the case where ECS
+      # said "stable" but the smoke test still failed.
+      - name: Roll back to the previous task definition
+        if: failure()
+        run: |
+          CURRENT=$(aws ecs describe-services --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE" \
+            --query 'services[0].taskDefinition' --output text)
+          if [ "$CURRENT" = "${{ steps.prev.outputs.arn }}" ]; then
+            echo "Service is already on the previous revision (ECS auto-rolled back). Nothing to do."
+          else
+            echo "Rolling back $CURRENT -> ${{ steps.prev.outputs.arn }}"
+            aws ecs update-service --cluster "$ECS_CLUSTER" --service "$ECS_SERVICE" \
+              --task-definition "${{ steps.prev.outputs.arn }}" --force-new-deployment > /dev/null
+            aws ecs wait services-stable --cluster "$ECS_CLUSTER" --services "$ECS_SERVICE"
+            echo "### :rewind: Rolled back to ${{ steps.prev.outputs.arn }}" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+      - name: Record deploy time (for your before/after metric)
+        if: always()
+        run: |
+          END=$(date +%s)
+          DUR=$(( END - ${{ steps.prev.outputs.started }} ))
+          echo "### Deploy stage duration: ${DUR}s (excludes the time spent waiting for approval)" >> "$GITHUB_STEP_SUMMARY"
