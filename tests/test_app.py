@@ -15,7 +15,7 @@ def test_index_returns_service_metadata(client):
     resp = client.get("/")
     assert resp.status_code == 200
     body = resp.get_json()
-    assert body["service"] == "ecs-cicd-demo"
+    assert body["service"] == "ecs-cicd-demo-v5"
     assert "version" in body
     assert "hostname" in body
 

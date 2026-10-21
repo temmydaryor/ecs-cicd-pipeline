@@ -26,7 +26,7 @@ def _unhealthy() -> bool:
 @app.get("/")
 def index():
     return jsonify(
-        service="ecs-cicd-demo",
+        service="ecs-cicd-demo-v5",
         version=VERSION,
         environment=APP_ENV,
         hostname=socket.gethostname(),
