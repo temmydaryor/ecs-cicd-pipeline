@@ -22,7 +22,7 @@ def test_index_returns_service_metadata(client):
 
 def test_health_ok_by_default(client):
     resp = client.get("/health")
-    assert resp.status_code == 201
+    assert resp.status_code == 200
     assert resp.get_json()["status"] == "ok"
 
 
