@@ -38,8 +38,6 @@ Do not publish a number you did not measure. Run each scenario 3 times and recor
 | Manual steps per deploy, before -> after | count them | |
 | Failed requests during a deploy | zero-downtime loop in the guide | |
 
-“1,200 requests across a rolling deployment (versions c3cb2a6 → ffc8af1): N failed.” Use the real fail number.
-
 ## Resume bullet templates (replace X, Y, Z with measured values)
 
 - Built a CI/CD pipeline (GitHub Actions -> ECR -> ECS Fargate) with OIDC federation, cutting deployment time from **X min** (manual) to **Y min** (automated) and removing **N** manual steps per release.
